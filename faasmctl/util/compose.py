@@ -15,7 +15,7 @@ DEFAULT_FAASM_CAPTURE_STDOUT = "off"
 DEFAULT_FAASM_OVERRIDE_CPU_COUNT = "8"
 
 
-def get_compose_env_vars(faasm_checkout, mount_source, ini_file=None):
+def get_compose_env_vars(faasm_checkout, mount_source, ini_file=None, taskset=None, numa=None):
     """
     Get the env. variables to call `docker compose` with
 
@@ -33,6 +33,11 @@ def get_compose_env_vars(faasm_checkout, mount_source, ini_file=None):
     """
     env = {}
     env["FAASM_DEPLOYMENT_TYPE"] = "compose"
+
+    if taskset:
+        env["WORKER_TASKSET_LIST"] = taskset
+    if numa:
+        env["WORKER_NUMA_NODE_LIST"] = numa
 
     if mount_source:
         env["FAASM_BUILD_DIR"] = join(faasm_checkout, "dev/faasm/build")
@@ -138,7 +143,7 @@ def get_compose_env_vars(faasm_checkout, mount_source, ini_file=None):
     return env
 
 
-def deploy_compose_cluster(faasm_checkout, workers, mount_source, ini_file):
+def deploy_compose_cluster(faasm_checkout, workers, mount_source, ini_file, taskset, numa):
     """
     Deploy a docker compose cluster
 
@@ -151,7 +156,7 @@ def deploy_compose_cluster(faasm_checkout, workers, mount_source, ini_file):
     Returns:
     - (str): path to the generated ini_file
     """
-    env = get_compose_env_vars(faasm_checkout, mount_source)
+    env = get_compose_env_vars(faasm_checkout, mount_source, taskset=taskset, numa=numa)
 
     # Generate random compose project name
     env["COMPOSE_PROJECT_NAME"] = "faasm-{}".format(generate_gid())

@@ -11,7 +11,7 @@ from os.path import abspath
 
 
 @task
-def compose(ctx, workers=2, mount_source=None, clean=False, ini_file=None):
+def compose(ctx, workers=2, mount_source=None, clean=False, ini_file=None, taskset=None, numa=None):
     """
     Deploy a Faasm cluster on docker compose
 
@@ -47,7 +47,7 @@ def compose(ctx, workers=2, mount_source=None, clean=False, ini_file=None):
         mount_source = False
         faasm_checkout, faasm_ver = fetch_faasm_code(force=clean)
 
-    return deploy_compose_cluster(faasm_checkout, workers, mount_source, ini_file)
+    return deploy_compose_cluster(faasm_checkout, workers, mount_source=mount_source, ini_file=ini_file, taskset=taskset, numa=numa)
 
 
 @task
