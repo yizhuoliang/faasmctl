@@ -46,8 +46,8 @@ def fetch_faasm_code(faasm_source=None, force=False):
     print("Checking out Faasm v{} to {}".format(get_faasm_version(), checkout_path))
     git_cmd = [
         "git clone",
-        "--branch v{}".format(get_faasm_version()),
-        "https://github.com/faasm/faasm",
+        "--branch overlaP",
+        "https://github.com/yizhuoliang/faasm",
         checkout_path,
     ]
     git_cmd = " ".join(git_cmd)
