@@ -8,7 +8,7 @@ from subprocess import run
 
 FAASMCTL_ROOT = dirname(dirname(realpath(__file__)))
 
-# Unfortunately, we need to duplicate this constants here as we need to be
+# Unfortunately, we need to duplicate these constants here as we need to be
 # able to run this file in standalone mode, as if the proto files are not
 # generated, some imports in `faasmctl` will fail
 GEN_PROTO_DIR = join(FAASMCTL_ROOT, "util", "gen_proto")
@@ -17,6 +17,13 @@ FAASM_CLI_IMAGE = "faasm.azurecr.io/cli"
 PROTO_FILES = [
     "faabric_pb2.py",
     "planner_pb2.py",
+]
+
+# New constants for C++ protobuf headers generation
+GEN_PROTO_CPP_DIR = join(FAASMCTL_ROOT, "util", "gen_proto_cpp")
+PROTO_CPP_HEADERS = [
+    "faabric.pb.h",
+    "planner.pb.h",
 ]
 
 
@@ -35,18 +42,23 @@ def get_faasm_version():
 
 def gen_proto_files(clean=False):
     """
-    Generate python proto files to interact with the Faasm cluster
+    Generate python proto files and C++ protobuf headers to interact with the Faasm cluster
     """
     if clean:
         rmtree(GEN_PROTO_DIR)
+        rmtree(GEN_PROTO_CPP_DIR)
 
     if not exists(GEN_PROTO_DIR):
         makedirs(GEN_PROTO_DIR)
+    if not exists(GEN_PROTO_CPP_DIR):
+        makedirs(GEN_PROTO_CPP_DIR)
 
     pb_files = [f for f in listdir(GEN_PROTO_DIR) if f.endswith("pb2.py")]
     pb_files.sort()
+    cpp_files = [f for f in listdir(GEN_PROTO_CPP_DIR) if f.endswith(".pb.h")]
+    cpp_files.sort()
 
-    if pb_files == PROTO_FILES:
+    if pb_files == PROTO_FILES and cpp_files == PROTO_CPP_HEADERS:
         return
 
     if "FAASM_VERSION" in environ:
@@ -74,8 +86,10 @@ def gen_proto_files(clean=False):
     p_bin = [p_bin for p_bin in protoc_bin if "build_subfolder" in p_bin]
     p_bin = p_bin[0].strip()
 
-    # Generate python protobuf files
+    # Directory containing the code inside the container
     code_dir = "/usr/local/code/faasm/faabric"
+
+    # Generate python protobuf files
     protoc_cmd = [
         p_bin,
         "--proto_path={}".format(code_dir),
@@ -87,7 +101,19 @@ def gen_proto_files(clean=False):
     docker_cmd = "{} bash -c '{}'".format(docker_exec_prefix, protoc_cmd)
     run(docker_cmd, shell=True, check=True)
 
-    # Finally, copy the generated protobuf files to the desired location
+    # Generate C++ protobuf headers
+    protoc_cmd_cpp = [
+        p_bin,
+        "--proto_path={}".format(code_dir),
+        "--cpp_out={}".format(code_dir),
+        "{}/src/planner/planner.proto".format(code_dir),
+        "{}/src/proto/faabric.proto".format(code_dir),
+    ]
+    protoc_cmd_cpp = " ".join(protoc_cmd_cpp)
+    docker_cmd_cpp = "{} bash -c '{}'".format(docker_exec_prefix, protoc_cmd_cpp)
+    run(docker_cmd_cpp, shell=True, check=True)
+
+    # Finally, copy the generated python protobuf files to the desired location
     for proto_file in PROTO_FILES:
         if "planner" in proto_file:
             proto_ctr_path = join(code_dir, "src", "planner", proto_file)
@@ -97,6 +123,19 @@ def gen_proto_files(clean=False):
 
         docker_cp_cmd = "docker cp {}:{} {}".format(
             tmp_ctr_name, proto_ctr_path, proto_faasmctl_path
+        )
+        run(docker_cp_cmd, shell=True, check=True)
+
+    # Copy the generated C++ header files to the desired location
+    for header in PROTO_CPP_HEADERS:
+        if "planner" in header:
+            header_ctr_path = join(code_dir, "src", "planner", header)
+        else:
+            header_ctr_path = join(code_dir, "src", "proto", header)
+        header_faasmctl_path = join(GEN_PROTO_CPP_DIR, header)
+
+        docker_cp_cmd = "docker cp {}:{} {}".format(
+            tmp_ctr_name, header_ctr_path, header_faasmctl_path
         )
         run(docker_cp_cmd, shell=True, check=True)
 
