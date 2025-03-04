@@ -388,7 +388,6 @@ std::string FaasmClient::preparePlannerMsg(const std::string& msgType, const std
     }
     
     std::stringstream ss;
-    ss << "{\"http_type\": \"" << msgType << "\", \"payload\": \"" << escapedJson << "\"}";
     
     return ss.str();
 }
@@ -396,10 +395,6 @@ std::string FaasmClient::preparePlannerMsg(const std::string& msgType, const std
 // Make HTTP POST request
 std::string FaasmClient::httpPost(const std::string& url, const std::string& data)
 {
-    // --- Debug printout so you can compare with Python's request ---
-    std::cerr << "[DEBUG] HTTP POST to " << url << " with data:\n"
-              << data << "\n\n";
-
     CURL* curl = curl_easy_init();
     std::string responseBuffer;
     
