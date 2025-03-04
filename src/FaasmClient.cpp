@@ -388,7 +388,7 @@ std::string FaasmClient::preparePlannerMsg(const std::string& msgType, const std
     }
     
     std::stringstream ss;
-    
+    ss << "{\"http_type\": \"" << msgType << "\", \"payload\": \"" << escapedJson << "\"}";
     return ss.str();
 }
 
