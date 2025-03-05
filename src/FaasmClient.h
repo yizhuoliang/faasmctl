@@ -4,13 +4,21 @@
 #include <vector>
 #include <map>
 #include <memory>
-#include <mutex>
 
 // Forward declarations for protobuf classes - full definitions will be included in .cpp files
 namespace faabric {
     class Message;
     class BatchExecuteRequest;
     class BatchExecuteRequestStatus;
+    
+    // Add forward declarations for planner namespace
+    namespace planner {
+        class HttpMessage;
+        class GetInFlightAppsResponse;
+        
+        // Forward declare the enum type - actual values defined in planner.pb.h
+        enum HttpMessage_Type : int;
+    }
 }
 
 namespace faasmctl {
@@ -37,7 +45,7 @@ public:
      * @param numMessages Number of messages to create
      * @param hostList Optional list of hosts to execute on
      * @param isAsync If true, returns immediately after sending request
-     * @return Status of the batch execution (empty status object if isAsync=true)
+     * @return Status of the batch execution (with appId for isAsync=true)
      */
     faabric::BatchExecuteRequestStatus invokeWasm(
         const std::map<std::string, std::string>& msgDict,
@@ -47,8 +55,20 @@ public:
     );
     
     /**
+     * Check the status of an asynchronous WebAssembly function invocation
+     * 
+     * @param appId The application ID returned from the async invocation
+     * @param expectedNumMessages The number of messages expected in the response
+     * @return Status of the batch execution
+     */
+    faabric::BatchExecuteRequestStatus checkAsyncStatus(
+        int32_t appId,
+        int expectedNumMessages
+    );
+    
+    /**
      * Get information about in-flight application requests
-     * Can be used to monitor cluster state and check on async invocations
+     * Can be used to monitor cluster state
      * 
      * @return List of in-flight application statuses
      */
@@ -67,10 +87,6 @@ private:
     // Configuration
     std::string iniFilePath;
     bool initialized = false;
-    
-    // Track async invocations
-    std::map<int32_t, std::pair<std::string, int>> asyncRequests; // appId -> {url, expectedNumMessages}
-    std::mutex asyncMutex;
     
     // Helper methods
     std::string getFaasmIniValue(const std::string& section, const std::string& key);

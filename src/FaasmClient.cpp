@@ -10,8 +10,8 @@
 #include <curl/curl.h>
 #include <algorithm>
 
-// Now include the generated protobuf header
-#include "../faasmctl/util/gen_proto_cpp/faabric.pb.h" 
+#include "../faasmctl/util/gen_proto_cpp/planner.pb.h"
+#include "../faasmctl/util/gen_proto_cpp/faabric.pb.h"
 
 namespace faasmctl {
 
@@ -152,8 +152,14 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeWasm(
     options.add_whitespace = false;
     google::protobuf::util::MessageToJsonString(*req, &jsonReq, options);
     
-    // Prepare planner message
-    std::string msg = preparePlannerMsg("EXECUTE_BATCH", jsonReq);
+    // Create proper HTTP message for EXECUTE_BATCH
+    faabric::planner::HttpMessage httpMsg;
+    httpMsg.set_type(faabric::planner::HttpMessage_Type_EXECUTE_BATCH);
+    httpMsg.set_payloadjson(jsonReq);
+    
+    // Serialize the HTTP message to JSON
+    std::string jsonHttpMsg;
+    google::protobuf::util::MessageToJsonString(httpMsg, &jsonHttpMsg, options);
     
     // Get planner host and port
     auto [host, port] = getFaasmPlannerHostPort(inDocker());
@@ -184,12 +190,19 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeWasm(
             req->mutable_messages(groupIdx)->set_executedhost((*hostList)[groupIdx]);
         }
         
+        // Create proper HTTP message for PRELOAD_SCHEDULING_DECISION
         std::string preloadJson;
         google::protobuf::util::MessageToJsonString(*req, &preloadJson, options);
-        std::string preloadMsg = preparePlannerMsg("PRELOAD_SCHEDULING_DECISION", preloadJson);
+        
+        faabric::planner::HttpMessage preloadHttpMsg;
+        preloadHttpMsg.set_type(faabric::planner::HttpMessage_Type_PRELOAD_SCHEDULING_DECISION);
+        preloadHttpMsg.set_payloadjson(preloadJson);
+        
+        std::string jsonPreloadHttpMsg;
+        google::protobuf::util::MessageToJsonString(preloadHttpMsg, &jsonPreloadHttpMsg, options);
         
         try {
-            httpPost(url, preloadMsg);
+            httpPost(url, jsonPreloadHttpMsg);
         } catch (const std::exception& e) {
             throw FaasmClientException("Error preloading scheduling decision: " + std::string(e.what()));
         }
@@ -197,16 +210,10 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeWasm(
     
     // Handle synchronous vs asynchronous invocation
     if (isAsync) {
-        // Just invoke and return empty status
-        int32_t appId = invokeAsync(url, msg, expectedNumMessages);
+        // Just invoke and return status with app ID
+        int32_t appId = invokeAsync(url, jsonHttpMsg, expectedNumMessages);
         
-        // Track async request for later retrieval
-        {
-            std::lock_guard<std::mutex> lock(asyncMutex);
-            asyncRequests[appId] = std::make_pair(url, expectedNumMessages);
-        }
-        
-        // Return empty status with just the app ID
+        // Return status with just the app ID
         faabric::BatchExecuteRequestStatus emptyStatus;
         emptyStatus.set_appid(appId);
         emptyStatus.set_expectednummessages(expectedNumMessages);
@@ -214,13 +221,13 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeWasm(
         return emptyStatus;
     } else {
         // Invoke and wait for results
-        return invokeAndAwait(url, msg, expectedNumMessages);
+        return invokeAndAwait(url, jsonHttpMsg, expectedNumMessages);
     }
 }
 
 /**
  * Get information about in-flight application requests
- * Can be used to monitor cluster state and check on async invocations
+ * Can be used to monitor cluster state
  * 
  * @return List of in-flight application statuses
  */
@@ -233,88 +240,127 @@ std::vector<faabric::BatchExecuteRequestStatus> FaasmClient::getInflightApps() {
     auto [host, port] = getFaasmPlannerHostPort(inDocker());
     std::string url = "http://" + host + ":" + port;
     
-    // Send request to get all in-flight apps
-    std::string inFlightMsg = preparePlannerMsg("GET_IN_FLIGHT_APPS", "");
-    std::string response;
+    // Create a proper HTTP message for GET_IN_FLIGHT_APPS
+    faabric::planner::HttpMessage httpMsg;
+    httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_IN_FLIGHT_APPS);
     
+    // Serialize the message to JSON
+    std::string jsonRequest;
+    google::protobuf::util::JsonPrintOptions printOptions;
+    printOptions.add_whitespace = false;
+    google::protobuf::util::MessageToJsonString(httpMsg, &jsonRequest, printOptions);
+    
+    // Send the request
+    std::string response;
     try {
-        response = httpPost(url, inFlightMsg);
+        response = httpPost(url, jsonRequest);
     } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Exception during HTTP request: " << e.what() << std::endl;
         throw FaasmClientException("Error getting in-flight apps: " + std::string(e.what()));
     }
     
-    // Parse response (format: {"appIds": [id1, id2, ...]})
+    // Parse the response as a proper GetInFlightAppsResponse message
     std::vector<faabric::BatchExecuteRequestStatus> result;
     
     try {
-        // Parse JSON response
+        faabric::planner::GetInFlightAppsResponse appsResponse;
         google::protobuf::util::JsonParseOptions parseOptions;
+        auto status = google::protobuf::util::JsonStringToMessage(response, &appsResponse, parseOptions);
         
-        // Simple hand parsing of the JSON array (since we don't have a protobuf for this response)
-        if (response.find("\"appIds\"") != std::string::npos) {
-            size_t start = response.find('[');
-            size_t end = response.find(']');
+        if (!status.ok()) {
+            std::cerr << "[ERROR] Failed to parse response: " << status.message() << std::endl;
+            throw FaasmClientException("Failed to parse response: " + status.message().ToString());
+        }
+        
+        // Process each app in the response
+        for (const auto& app : appsResponse.apps()) {
+            int32_t appId = app.appid();
             
-            if (start != std::string::npos && end != std::string::npos) {
-                std::string idsStr = response.substr(start + 1, end - start - 1);
-                std::stringstream ss(idsStr);
-                std::string item;
-                
-                // Parse each app ID and query its status
-                while (std::getline(ss, item, ',')) {
-                    // Trim whitespace and quotes
-                    item.erase(0, item.find_first_not_of(" \t\n\r\""));
-                    item.erase(item.find_last_not_of(" \t\n\r\"") + 1);
-                    
-                    if (!item.empty()) {
-                        int32_t appId = std::stoi(item);
-                        
-                        // Create status object
-                        faabric::BatchExecuteRequestStatus status;
-                        status.set_appid(appId);
-                        
-                        // Check if this is one of our tracked async requests
-                        {
-                            std::lock_guard<std::mutex> lock(asyncMutex);
-                            auto it = asyncRequests.find(appId);
-                            if (it != asyncRequests.end()) {
-                                // Query actual status from the planner
-                                status.set_expectednummessages(it->second.second);
-                                
-                                // Create status query message
-                                std::string statusJson;
-                                google::protobuf::util::JsonPrintOptions printOptions;
-                                printOptions.add_whitespace = false;
-                                google::protobuf::util::MessageToJsonString(status, &statusJson, printOptions);
-                                std::string statusMsg = preparePlannerMsg("EXECUTE_BATCH_STATUS", statusJson);
-                                
-                                try {
-                                    std::string statusResponse = httpPost(it->second.first, statusMsg);
-                                    google::protobuf::util::JsonStringToMessage(statusResponse, &status, parseOptions);
-                                    
-                                    // If finished, remove from tracked requests
-                                    if (status.finished()) {
-                                        asyncRequests.erase(it);
-                                    }
-                                } catch (const FaasmClientRequestException& e) {
-                                    if (std::string(e.what()) != "App not registered in results") {
-                                        // Non-expected error, clear status
-                                        status.set_finished(false);
-                                    }
-                                }
-                            }
-                        }
-                        
-                        result.push_back(status);
-                    }
+            // Create status object
+            faabric::BatchExecuteRequestStatus status;
+            status.set_appid(appId);
+            status.set_finished(false); // If it's in the in-flight list, it's not finished
+            
+            // Add host IPs as message results
+            for (const auto& hostIp : app.hostips()) {
+                if (!hostIp.empty()) {
+                    faabric::Message* msg = status.add_messageresults();
+                    msg->set_executedhost(hostIp);
                 }
             }
+            
+            result.push_back(status);
         }
     } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Exception during response parsing: " << e.what() << std::endl;
         throw FaasmClientException("Error parsing in-flight apps response: " + std::string(e.what()));
     }
     
     return result;
+}
+
+/**
+ * Check the status of an asynchronous WebAssembly function invocation
+ * 
+ * @param appId The application ID returned from the async invocation
+ * @param expectedNumMessages The number of messages expected in the response
+ * @return Status of the batch execution
+ */
+faabric::BatchExecuteRequestStatus FaasmClient::checkAsyncStatus(
+    int32_t appId,
+    int expectedNumMessages
+) {
+    if (!initialized) {
+        throw FaasmClientConfigException("FaasmClient not initialized. Call init() first.");
+    }
+    
+    // Get planner URL
+    auto [host, port] = getFaasmPlannerHostPort(inDocker());
+    std::string url = "http://" + host + ":" + port;
+    
+    // Create status object with the appId
+    faabric::BatchExecuteRequestStatus status;
+    status.set_appid(appId);
+    status.set_expectednummessages(expectedNumMessages);
+    
+    // Serialize the status to JSON
+    std::string statusJson;
+    google::protobuf::util::JsonPrintOptions printOptions;
+    printOptions.add_whitespace = false;
+    google::protobuf::util::MessageToJsonString(status, &statusJson, printOptions);
+    
+    // Create proper HTTP message for EXECUTE_BATCH_STATUS
+    faabric::planner::HttpMessage statusHttpMsg;
+    statusHttpMsg.set_type(faabric::planner::HttpMessage_Type_EXECUTE_BATCH_STATUS);
+    statusHttpMsg.set_payloadjson(statusJson);
+    
+    // Serialize the HTTP message to JSON
+    std::string statusMsgJson;
+    google::protobuf::util::MessageToJsonString(statusHttpMsg, &statusMsgJson, printOptions);
+    
+    try {
+        std::string statusResponse = httpPost(url, statusMsgJson);
+        
+        google::protobuf::util::JsonParseOptions parseOptions;
+        bool parseSuccess = google::protobuf::util::JsonStringToMessage(statusResponse, &status, parseOptions).ok();
+        
+        if (!parseSuccess) {
+            std::cerr << "[ERROR] Failed to parse status response" << std::endl;
+            throw FaasmClientException("Failed to parse status response");
+        }
+        
+    } catch (const FaasmClientRequestException& e) {
+        if (std::string(e.what()) == "App not registered in results") {
+            // If the app is not registered, it's either still waiting to be executed or has been lost
+            // We'll return a not-finished status
+            status.set_finished(false);
+        } else {
+            std::cerr << "[ERROR] Exception querying status: " << e.what() << " (code=" << e.getStatusCode() << ")" << std::endl;
+            throw; // Re-throw the exception
+        }
+    }
+    
+    return status;
 }
 
 //------------------------------------------------------------------------------
@@ -373,23 +419,58 @@ std::pair<std::string, std::string> FaasmClient::getFaasmPlannerHostPort(bool in
     return std::make_pair(host, port);
 }
 
-// Prepare planner message (format as JSON with http_type and payload)
+// Prepare planner message using the proper HttpMessage format
 std::string FaasmClient::preparePlannerMsg(const std::string& msgType, const std::string& msgBody) {
-    // Let's use a very direct approach that mimics exactly what the Python code does
+    // Create an HttpMessage protobuf
+    faabric::planner::HttpMessage httpMsg;
     
-    // 1. Create a JSON structure with http_type and payload
-    // 2. For payload, use the raw string but replace all double quotes with escaped quotes
-    
-    std::string escapedJson = msgBody;
-    size_t pos = 0;
-    while ((pos = escapedJson.find("\"", pos)) != std::string::npos) {
-        escapedJson.replace(pos, 1, "\\\"");
-        pos += 2;  // Move past the escaped quote
+    // Set the message type based on the string input
+    if (msgType == "GET_IN_FLIGHT_APPS") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_IN_FLIGHT_APPS);
+    } else if (msgType == "EXECUTE_BATCH") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_EXECUTE_BATCH);
+    } else if (msgType == "EXECUTE_BATCH_STATUS") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_EXECUTE_BATCH_STATUS);
+    } else if (msgType == "PRELOAD_SCHEDULING_DECISION") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_PRELOAD_SCHEDULING_DECISION);
+    } else if (msgType == "RESET") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_RESET);
+    } else if (msgType == "FLUSH_AVAILABLE_HOSTS") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_FLUSH_AVAILABLE_HOSTS);
+    } else if (msgType == "FLUSH_EXECUTORS") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_FLUSH_EXECUTORS);
+    } else if (msgType == "FLUSH_SCHEDULING_STATE") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_FLUSH_SCHEDULING_STATE);
+    } else if (msgType == "GET_AVAILABLE_HOSTS") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_AVAILABLE_HOSTS);
+    } else if (msgType == "GET_CONFIG") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_CONFIG);
+    } else if (msgType == "GET_EXEC_GRAPH") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_EXEC_GRAPH);
+    } else if (msgType == "SET_POLICY") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_SET_POLICY);
+    } else if (msgType == "GET_POLICY") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_GET_POLICY);
+    } else if (msgType == "SET_NEXT_EVICTED_VM") {
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_SET_NEXT_EVICTED_VM);
+    } else {
+        // Default to no type if not recognized
+        httpMsg.set_type(faabric::planner::HttpMessage_Type_NO_TYPE);
     }
     
-    std::stringstream ss;
-    ss << "{\"http_type\": \"" << msgType << "\", \"payload\": \"" << escapedJson << "\"}";
-    return ss.str();
+    // Set the payload if provided
+    if (!msgBody.empty()) {
+        // Based on the proto definition, the field is called "payloadJson"
+        httpMsg.set_payloadjson(msgBody);
+    }
+    
+    // Serialize to JSON
+    std::string jsonStr;
+    google::protobuf::util::JsonPrintOptions options;
+    options.add_whitespace = false;
+    google::protobuf::util::MessageToJsonString(httpMsg, &jsonStr, options);
+    
+    return jsonStr;
 }
 
 // Make HTTP POST request
@@ -565,19 +646,25 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
     google::protobuf::util::JsonStringToMessage(responseText, &berStatus, parseOptions);
     berStatus.set_expectednummessages(expectedNumMessages);
     
-    // Prepare status polling message
+    // Prepare status polling message using the proper HttpMessage
     std::string statusJson;
     google::protobuf::util::JsonPrintOptions printOptions;
     printOptions.add_whitespace = false;
     google::protobuf::util::MessageToJsonString(berStatus, &statusJson, printOptions);
-    std::string statusMsg = preparePlannerMsg("EXECUTE_BATCH_STATUS", statusJson);
+    
+    faabric::planner::HttpMessage statusHttpMsg;
+    statusHttpMsg.set_type(faabric::planner::HttpMessage_Type_EXECUTE_BATCH_STATUS);
+    statusHttpMsg.set_payloadjson(statusJson);
+    
+    std::string statusMsgJson;
+    google::protobuf::util::MessageToJsonString(statusHttpMsg, &statusMsgJson, printOptions);
     
     // Poll until finished
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(pollPeriodMs));
         
         try {
-            std::string statusResponse = httpPost(url, statusMsg);
+            std::string statusResponse = httpPost(url, statusMsgJson);
             google::protobuf::util::JsonStringToMessage(statusResponse, &berStatus, parseOptions);
             
             if (berStatus.finished()) {
@@ -587,7 +674,7 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
             if (std::string(e.what()) == "App not registered in results") {
                 // This is expected, keep polling
             } else {
-                std::cerr << "Error polling for status: " << e.what() << std::endl;
+                std::cerr << "[ERROR] Error polling for status: " << e.what() << std::endl;
                 break;
             }
         }

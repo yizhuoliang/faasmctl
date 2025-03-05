@@ -8,6 +8,7 @@
 #define GOOGLE_PROTOBUF_SKIP_VERSION_CHECK 1
 
 #include "../faasmctl/util/gen_proto_cpp/faabric.pb.h"
+#include "../faasmctl/util/gen_proto_cpp/planner.pb.h"
 
 namespace py = pybind11;
 
@@ -73,6 +74,58 @@ py::dict batch_status_to_dict(const faabric::BatchExecuteRequestStatus& status) 
     return result;
 }
 
+// Helper to convert HttpMessage_Type to string
+std::string httpMessageTypeToString(faabric::planner::HttpMessage_Type type) {
+    switch(type) {
+        case faabric::planner::HttpMessage_Type_RESET:
+            return "RESET";
+        case faabric::planner::HttpMessage_Type_FLUSH_AVAILABLE_HOSTS:
+            return "FLUSH_AVAILABLE_HOSTS";
+        case faabric::planner::HttpMessage_Type_FLUSH_EXECUTORS:
+            return "FLUSH_EXECUTORS";
+        case faabric::planner::HttpMessage_Type_FLUSH_SCHEDULING_STATE:
+            return "FLUSH_SCHEDULING_STATE";
+        case faabric::planner::HttpMessage_Type_GET_AVAILABLE_HOSTS:
+            return "GET_AVAILABLE_HOSTS";
+        case faabric::planner::HttpMessage_Type_GET_CONFIG:
+            return "GET_CONFIG";
+        case faabric::planner::HttpMessage_Type_GET_EXEC_GRAPH:
+            return "GET_EXEC_GRAPH";
+        case faabric::planner::HttpMessage_Type_GET_IN_FLIGHT_APPS:
+            return "GET_IN_FLIGHT_APPS";
+        case faabric::planner::HttpMessage_Type_EXECUTE_BATCH:
+            return "EXECUTE_BATCH";
+        case faabric::planner::HttpMessage_Type_EXECUTE_BATCH_STATUS:
+            return "EXECUTE_BATCH_STATUS";
+        case faabric::planner::HttpMessage_Type_PRELOAD_SCHEDULING_DECISION:
+            return "PRELOAD_SCHEDULING_DECISION";
+        case faabric::planner::HttpMessage_Type_SET_POLICY:
+            return "SET_POLICY";
+        case faabric::planner::HttpMessage_Type_GET_POLICY:
+            return "GET_POLICY";
+        case faabric::planner::HttpMessage_Type_SET_NEXT_EVICTED_VM:
+            return "SET_NEXT_EVICTED_VM";
+        default:
+            return "NO_TYPE";
+    }
+}
+
+// Helper to convert an InFlightApp to a Python dictionary
+py::dict inFlightAppToDict(const faabric::planner::GetInFlightAppsResponse::InFlightApp& app) {
+    py::dict result;
+    result["appId"] = app.appid();
+    result["subType"] = app.subtype();
+    result["size"] = app.size();
+    
+    py::list hostIps;
+    for (const auto& ip : app.hostips()) {
+        hostIps.append(ip);
+    }
+    result["hostIps"] = hostIps;
+    
+    return result;
+}
+
 PYBIND11_MODULE(faasm_client_cpp, m) {
     m.doc() = "Python bindings for the FaasmClient C++ library";
     
@@ -80,6 +133,25 @@ PYBIND11_MODULE(faasm_client_cpp, m) {
     py::register_exception<faasmctl::FaasmClientException>(m, "FaasmClientException");
     py::register_exception<faasmctl::FaasmClientConfigException>(m, "FaasmClientConfigException");
     py::register_exception<faasmctl::FaasmClientRequestException>(m, "FaasmClientRequestException");
+    
+    // Add enum bindings for HttpMessage_Type
+    py::enum_<faabric::planner::HttpMessage_Type>(m, "HttpMessageType")
+        .value("NO_TYPE", faabric::planner::HttpMessage_Type_NO_TYPE)
+        .value("RESET", faabric::planner::HttpMessage_Type_RESET)
+        .value("FLUSH_AVAILABLE_HOSTS", faabric::planner::HttpMessage_Type_FLUSH_AVAILABLE_HOSTS)
+        .value("FLUSH_EXECUTORS", faabric::planner::HttpMessage_Type_FLUSH_EXECUTORS)
+        .value("FLUSH_SCHEDULING_STATE", faabric::planner::HttpMessage_Type_FLUSH_SCHEDULING_STATE)
+        .value("GET_AVAILABLE_HOSTS", faabric::planner::HttpMessage_Type_GET_AVAILABLE_HOSTS)
+        .value("GET_CONFIG", faabric::planner::HttpMessage_Type_GET_CONFIG)
+        .value("GET_EXEC_GRAPH", faabric::planner::HttpMessage_Type_GET_EXEC_GRAPH)
+        .value("GET_IN_FLIGHT_APPS", faabric::planner::HttpMessage_Type_GET_IN_FLIGHT_APPS)
+        .value("EXECUTE_BATCH", faabric::planner::HttpMessage_Type_EXECUTE_BATCH)
+        .value("EXECUTE_BATCH_STATUS", faabric::planner::HttpMessage_Type_EXECUTE_BATCH_STATUS)
+        .value("PRELOAD_SCHEDULING_DECISION", faabric::planner::HttpMessage_Type_PRELOAD_SCHEDULING_DECISION)
+        .value("SET_POLICY", faabric::planner::HttpMessage_Type_SET_POLICY)
+        .value("GET_POLICY", faabric::planner::HttpMessage_Type_GET_POLICY)
+        .value("SET_NEXT_EVICTED_VM", faabric::planner::HttpMessage_Type_SET_NEXT_EVICTED_VM)
+        .export_values();
     
     // FaasmClient class binding
     py::class_<faasmctl::FaasmClient>(m, "FaasmClient")
@@ -132,4 +204,7 @@ PYBIND11_MODULE(faasm_client_cpp, m) {
         auto result = get_num_idle_cpus_from_in_flight_apps(num_vms, num_cpus_per_vm, cppApps);
         return py::make_tuple(result.first, result.second);
     }, py::arg("num_vms"), py::arg("num_cpus_per_vm"), py::arg("in_flight_apps"));
+    
+    // Add helper function for debugging
+    m.def("http_message_type_to_string", &httpMessageTypeToString);
 }

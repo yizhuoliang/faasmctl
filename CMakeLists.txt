@@ -23,18 +23,29 @@ find_package(CURL REQUIRED)
 
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
-# Create the src/proto directory structure if needed
+# Create the required directory structures
 set(SRC_PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/proto)
-set(PROTO_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/faasmctl/util/gen_proto_cpp/faabric.pb.h)
-set(PROTO_HEADER_COPY ${SRC_PROTO_DIR}/faabric.pb.h)
+set(SRC_PLANNER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/planner)
+
+# Set paths for proto headers
+set(FAABRIC_PROTO_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/faasmctl/util/gen_proto_cpp/faabric.pb.h)
+set(FAABRIC_PROTO_HEADER_COPY ${SRC_PROTO_DIR}/faabric.pb.h)
+set(PLANNER_PROTO_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/faasmctl/util/gen_proto_cpp/planner.pb.h)
+set(PLANNER_PROTO_HEADER_COPY ${SRC_PLANNER_DIR}/planner.pb.h)
+
 set(PROTO_SETUP_FLAG ${CMAKE_CURRENT_BINARY_DIR}/proto_setup.flag)
 
 add_custom_command(
     OUTPUT ${PROTO_SETUP_FLAG}
+    # Create both required directories
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SRC_PROTO_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy ${PROTO_HEADER} ${PROTO_HEADER_COPY}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SRC_PLANNER_DIR}
+    # Copy faabric.pb.h to src/proto
+    COMMAND ${CMAKE_COMMAND} -E copy ${FAABRIC_PROTO_HEADER} ${FAABRIC_PROTO_HEADER_COPY}
+    # Copy planner.pb.h to src/planner
+    COMMAND ${CMAKE_COMMAND} -E copy ${PLANNER_PROTO_HEADER} ${PLANNER_PROTO_HEADER_COPY}
     COMMAND ${CMAKE_COMMAND} -E touch ${PROTO_SETUP_FLAG}
-    DEPENDS ${PROTO_HEADER}
+    DEPENDS ${FAABRIC_PROTO_HEADER} ${PLANNER_PROTO_HEADER}
     COMMENT "Setting up protobuf include structure"
 )
 
@@ -50,6 +61,7 @@ set(FAASM_CLIENT_SOURCES
     src/FaasmClient.cpp
     src/FaasmUtils.cpp
     faasmctl/util/gen_proto_cpp/faabric.pb.cc
+    faasmctl/util/gen_proto_cpp/planner.pb.cc
 )
 
 add_library(faasm_client_static STATIC ${FAASM_CLIENT_SOURCES})

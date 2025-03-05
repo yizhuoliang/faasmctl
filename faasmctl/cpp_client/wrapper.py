@@ -67,6 +67,19 @@ class FaasmClientWrapper:
             async_execution  # bool
         )
     
+    def check_async_status(self, app_id: int, expected_num_messages: int) -> Dict[str, Any]:
+        """
+        Check the status of an asynchronous function invocation
+        
+        Args:
+            app_id: Application ID returned from an async invoke_function call
+            expected_num_messages: Expected number of messages in the response
+            
+        Returns:
+            Dict containing the current status of the execution
+        """
+        return self.client.check_async_status(app_id, expected_num_messages)
+    
     def get_inflight_apps(self) -> List[Dict[str, Any]]:
         """
         Get information about in-flight applications
@@ -74,17 +87,21 @@ class FaasmClientWrapper:
         Returns:
             List of dicts containing application statuses
         """
-        return self.client.get_inflight_apps()
+        res = self.client.get_inflight_apps()
+        print(res)
+        return res
     
     def wait_for_completion(self, 
-                          app_ids: List[int], 
-                          poll_interval_secs: float = 1.0,
-                          timeout_secs: Optional[float] = None) -> bool:
+                           app_ids: List[int],
+                           expected_num_messages: int = 1, 
+                           poll_interval_secs: float = 1.0,
+                           timeout_secs: Optional[float] = None) -> bool:
         """
         Wait for completion of specific application IDs
         
         Args:
             app_ids: List of application IDs to wait for
+            expected_num_messages: Expected number of messages per app (for checking status)
             poll_interval_secs: How often to poll for status
             timeout_secs: Maximum time to wait (None = wait indefinitely)
             
@@ -98,16 +115,29 @@ class FaasmClientWrapper:
             if timeout_secs is not None and (time.time() - start_time) > timeout_secs:
                 return False
             
-            # Get in-flight applications
+            # Check status of all app IDs - use both old method (get_inflight_apps) and new method (check_async_status)
+            all_done = True
+            
+            # First check with get_inflight_apps for running apps
             in_flight_apps = self.get_inflight_apps()
             
-            # Check if our app IDs are still in-flight and not finished
-            all_done = True
             for app_id in app_ids:
+                app_running = False
                 for app in in_flight_apps:
-                    if app["appId"] == app_id and not app["finished"]:
+                    if app["appId"] == app_id:
                         all_done = False
+                        app_running = True
                         break
+                
+                # If app not running, check if it's finished using the new API
+                if not app_running:
+                    try:
+                        status = self.check_async_status(app_id, expected_num_messages)
+                        if not status["finished"]:
+                            all_done = False
+                    except Exception:
+                        # If we can't check status, assume it's not done
+                        all_done = False
             
             if all_done:
                 return True
@@ -224,8 +254,13 @@ class FaasmClientWrapper:
             
             if not found:
                 # App is no longer in-flight, so it must be complete
-                # Add placeholder result
-                final_results.append({"appId": app_id, "finished": True})
+                # Try to get status with the new API, or create a placeholder
+                try:
+                    status = self.check_async_status(app_id, 1)  # Default to 1 message expected
+                    final_results.append(status)
+                except Exception:
+                    # Add placeholder result
+                    final_results.append({"appId": app_id, "finished": True})
         
         return final_results
 
