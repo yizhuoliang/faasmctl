@@ -42,19 +42,45 @@ std::pair<int, int> get_num_idle_cpus_from_in_flight_apps(
     return std::make_pair(num_idle_vms, num_idle_cpus);
 }
 
+// Convert MessageMetrics to Python dictionary
+py::dict message_metrics_to_dict(const faasmctl::MessageMetrics& metrics) {
+    py::dict result;
+    result["id"] = metrics.id;
+    result["appId"] = metrics.appId;
+    result["groupId"] = metrics.groupId;
+    result["groupIdx"] = metrics.groupIdx;
+    result["executedHost"] = metrics.executedHost;
+    result["startTimestamp"] = metrics.startTimestamp;
+    result["finishTimestamp"] = metrics.finishTimestamp;
+    result["returnValue"] = metrics.returnValue;
+    result["outputData"] = metrics.outputData;
+    result["durationMs"] = metrics.getDurationMs();
+    
+    return result;
+}
+
 // Custom converter for protobuf messages to Python dictionaries
 py::dict message_to_dict(const faabric::Message& msg) {
     py::dict result;
     result["id"] = msg.id();
     result["appId"] = msg.appid();
+    result["groupId"] = msg.groupid();
+    result["groupIdx"] = msg.groupidx();
     result["user"] = msg.user();
     result["function"] = msg.function();
     result["inputData"] = msg.inputdata();
     result["outputData"] = msg.outputdata();
     result["returnValue"] = msg.returnvalue();
     result["executedHost"] = msg.executedhost();
+    result["startTimestamp"] = msg.starttimestamp();
+    result["finishTimestamp"] = msg.finishtimestamp();
     
-    // Add other fields as needed
+    // Calculate duration if both timestamps are present
+    if (msg.starttimestamp() > 0 && msg.finishtimestamp() > 0) {
+        result["durationMs"] = msg.finishtimestamp() - msg.starttimestamp();
+    } else {
+        result["durationMs"] = py::none();
+    }
     
     return result;
 }
@@ -70,6 +96,16 @@ py::dict batch_status_to_dict(const faabric::BatchExecuteRequestStatus& status) 
         messageResults.append(message_to_dict(msg));
     }
     result["messageResults"] = messageResults;
+    
+    // Extract metrics and add to result
+    faasmctl::FaasmClient& client = faasmctl::FaasmClient::getInstance();
+    auto metrics = client.extractMessageMetrics(status);
+    
+    py::list metricsResults;
+    for (const auto& metric : metrics) {
+        metricsResults.append(message_metrics_to_dict(metric));
+    }
+    result["metrics"] = metricsResults;
     
     return result;
 }
@@ -153,6 +189,25 @@ PYBIND11_MODULE(faasm_client_cpp, m) {
         .value("SET_NEXT_EVICTED_VM", faabric::planner::HttpMessage_Type_SET_NEXT_EVICTED_VM)
         .export_values();
     
+    // MessageMetrics class binding
+    py::class_<faasmctl::MessageMetrics>(m, "MessageMetrics")
+        .def(py::init<>())
+        .def_readwrite("id", &faasmctl::MessageMetrics::id)
+        .def_readwrite("appId", &faasmctl::MessageMetrics::appId)
+        .def_readwrite("groupId", &faasmctl::MessageMetrics::groupId)
+        .def_readwrite("groupIdx", &faasmctl::MessageMetrics::groupIdx)
+        .def_readwrite("executedHost", &faasmctl::MessageMetrics::executedHost)
+        .def_readwrite("startTimestamp", &faasmctl::MessageMetrics::startTimestamp)
+        .def_readwrite("finishTimestamp", &faasmctl::MessageMetrics::finishTimestamp)
+        .def_readwrite("returnValue", &faasmctl::MessageMetrics::returnValue)
+        .def_readwrite("outputData", &faasmctl::MessageMetrics::outputData)
+        .def("get_duration_ms", &faasmctl::MessageMetrics::getDurationMs)
+        .def("__repr__", [](const faasmctl::MessageMetrics& m) {
+            return "<MessageMetrics id=" + std::to_string(m.id) + 
+                   " host=" + m.executedHost + 
+                   " duration=" + std::to_string(m.getDurationMs()) + "ms>";
+        });
+    
     // FaasmClient class binding
     py::class_<faasmctl::FaasmClient>(m, "FaasmClient")
         .def_static("get_instance", &faasmctl::FaasmClient::getInstance, py::return_value_policy::reference)
@@ -170,6 +225,12 @@ PYBIND11_MODULE(faasm_client_cpp, m) {
         py::arg("num_messages") = 1,
         py::arg("host_list") = nullptr,
         py::arg("is_async") = false)
+        .def("check_async_status", [](faasmctl::FaasmClient& self, int32_t appId, int expectedNumMessages) {
+            auto result = self.checkAsyncStatus(appId, expectedNumMessages);
+            return batch_status_to_dict(result);
+        },
+        py::arg("app_id"),
+        py::arg("expected_num_messages"))
         .def("get_inflight_apps", [](faasmctl::FaasmClient& self) {
             auto results = self.getInflightApps();
             py::list pyResults;
@@ -177,6 +238,14 @@ PYBIND11_MODULE(faasm_client_cpp, m) {
                 pyResults.append(batch_status_to_dict(status));
             }
             return pyResults;
+        })
+        .def("extract_message_metrics", [](faasmctl::FaasmClient& self, const faabric::BatchExecuteRequestStatus& status) {
+            auto metrics = self.extractMessageMetrics(status);
+            py::list pyMetrics;
+            for (const auto& metric : metrics) {
+                pyMetrics.append(message_metrics_to_dict(metric));
+            }
+            return pyMetrics;
         });
     
     // Utility functions

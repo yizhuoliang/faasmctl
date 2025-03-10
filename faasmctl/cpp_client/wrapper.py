@@ -48,7 +48,7 @@ class FaasmClientWrapper:
             async_execution: Whether to return immediately or wait for completion
             
         Returns:
-            Dict containing the execution results
+            Dict containing the execution results and metrics
         """
         msg_dict = {
             "user": user,
@@ -76,7 +76,7 @@ class FaasmClientWrapper:
             expected_num_messages: Expected number of messages in the response
             
         Returns:
-            Dict containing the current status of the execution
+            Dict containing the current status of the execution and metrics if completed
         """
         return self.client.check_async_status(app_id, expected_num_messages)
     
@@ -87,15 +87,27 @@ class FaasmClientWrapper:
         Returns:
             List of dicts containing application statuses
         """
-        res = self.client.get_inflight_apps()
-        print(res)
-        return res
+        return self.client.get_inflight_apps()
+    
+    def get_execution_metrics(self, app_id: int, expected_num_messages: int = 1) -> List[Dict[str, Any]]:
+        """
+        Get detailed execution metrics for a completed function
+        
+        Args:
+            app_id: Application ID to get metrics for
+            expected_num_messages: Expected number of messages
+            
+        Returns:
+            List of message metrics with execution details
+        """
+        status = self.check_async_status(app_id, expected_num_messages)
+        return status.get("metrics", [])
     
     def wait_for_completion(self, 
                            app_ids: List[int],
                            expected_num_messages: int = 1, 
                            poll_interval_secs: float = 1.0,
-                           timeout_secs: Optional[float] = None) -> bool:
+                           timeout_secs: Optional[float] = None) -> Dict[int, Dict[str, Any]]:
         """
         Wait for completion of specific application IDs
         
@@ -106,48 +118,49 @@ class FaasmClientWrapper:
             timeout_secs: Maximum time to wait (None = wait indefinitely)
             
         Returns:
-            True if all completed successfully, False if timeout occurred
+            Dict mapping app_id to its final status dict, with metrics included
         """
         start_time = time.time()
+        remaining_app_ids = set(app_ids)
+        results = {}
         
-        while True:
+        while remaining_app_ids:
             # Check timeout
             if timeout_secs is not None and (time.time() - start_time) > timeout_secs:
-                return False
+                # For any remaining apps, get their current status
+                for app_id in remaining_app_ids:
+                    if app_id not in results:
+                        try:
+                            results[app_id] = self.check_async_status(app_id, expected_num_messages)
+                        except Exception:
+                            results[app_id] = {"appId": app_id, "finished": False, "timedOut": True}
+                return results
             
-            # Check status of all app IDs - use both old method (get_inflight_apps) and new method (check_async_status)
-            all_done = True
+            # Check status of remaining app IDs
+            completed_app_ids = set()
             
-            # First check with get_inflight_apps for running apps
-            in_flight_apps = self.get_inflight_apps()
+            for app_id in remaining_app_ids:
+                try:
+                    status = self.check_async_status(app_id, expected_num_messages)
+                    if status["finished"]:
+                        results[app_id] = status
+                        completed_app_ids.add(app_id)
+                except Exception:
+                    # If we can't check status, assume it's not done
+                    pass
             
-            for app_id in app_ids:
-                app_running = False
-                for app in in_flight_apps:
-                    if app["appId"] == app_id:
-                        all_done = False
-                        app_running = True
-                        break
-                
-                # If app not running, check if it's finished using the new API
-                if not app_running:
-                    try:
-                        status = self.check_async_status(app_id, expected_num_messages)
-                        if not status["finished"]:
-                            all_done = False
-                    except Exception:
-                        # If we can't check status, assume it's not done
-                        all_done = False
+            # Remove completed apps from the remaining set
+            remaining_app_ids -= completed_app_ids
             
-            if all_done:
-                return True
-            
-            # Wait before polling again
-            time.sleep(poll_interval_secs)
+            if remaining_app_ids:
+                # Wait before polling again
+                time.sleep(poll_interval_secs)
+        
+        return results
     
     def get_cluster_utilization(self, 
                               num_vms: int, 
-                              num_cpus_per_vm: int) -> Tuple[int, int, float]:
+                              num_cpus_per_vm: int) -> Tuple[int, int, float, Dict[str, int]]:
         """
         Calculate cluster utilization
         
@@ -156,7 +169,8 @@ class FaasmClientWrapper:
             num_cpus_per_vm: Number of CPUs per VM
             
         Returns:
-            Tuple of (idle_vms, idle_cpus, utilization_percentage)
+            Tuple of (idle_vms, idle_cpus, utilization_percentage, host_usage)
+            where host_usage is a dict mapping host IPs to number of used CPUs
         """
         in_flight_apps = self.get_inflight_apps()
         
@@ -186,7 +200,7 @@ class FaasmClientWrapper:
         # Calculate utilization percentage
         utilization = (total_cpus - idle_cpus) / total_cpus * 100.0 if total_cpus > 0 else 0.0
         
-        return idle_vms, idle_cpus, utilization
+        return idle_vms, idle_cpus, utilization, worker_occupation
     
     def batch_invoke(self, 
                     user: str,
@@ -205,7 +219,7 @@ class FaasmClientWrapper:
             max_concurrent: Maximum number of concurrent executions
             
         Returns:
-            List of results for each invocation
+            List of results for each invocation, including execution metrics
         """
         results = []
         app_ids = []
@@ -228,7 +242,17 @@ class FaasmClientWrapper:
                     batch_app_ids.append(result["appId"])
                 
                 # Wait for batch to complete
-                self.wait_for_completion(batch_app_ids)
+                batch_results = self.wait_for_completion(batch_app_ids)
+                
+                # Update the results with the final status including metrics
+                for i, app_id in enumerate(batch_app_ids):
+                    if app_id in batch_results:
+                        # Find and update the corresponding result in the results list
+                        for j, res in enumerate(results):
+                            if res["appId"] == app_id:
+                                results[j] = batch_results[app_id]
+                                break
+                
                 app_ids.extend(batch_app_ids)
         else:
             # Sequential execution
@@ -239,30 +263,59 @@ class FaasmClientWrapper:
                 results.append(result)
                 app_ids.append(result["appId"])
         
-        # Update results with final status
-        final_results = []
-        for app_id in app_ids:
-            # Look for this app in the in-flight apps
-            in_flight_apps = self.get_inflight_apps()
-            found = False
-            
-            for app in in_flight_apps:
-                if app["appId"] == app_id:
-                    final_results.append(app)
-                    found = True
-                    break
-            
-            if not found:
-                # App is no longer in-flight, so it must be complete
-                # Try to get status with the new API, or create a placeholder
-                try:
-                    status = self.check_async_status(app_id, 1)  # Default to 1 message expected
-                    final_results.append(status)
-                except Exception:
-                    # Add placeholder result
-                    final_results.append({"appId": app_id, "finished": True})
+        return results
+    
+    def analyze_execution_times(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Analyze execution metrics from a batch of function invocations
         
-        return final_results
+        Args:
+            results: List of result dictionaries from batch_invoke
+            
+        Returns:
+            Dict with execution time statistics
+        """
+        if not results:
+            return {"error": "No results to analyze"}
+        
+        durations = []
+        hosts = set()
+        
+        for result in results:
+            if "metrics" in result:
+                for metric in result["metrics"]:
+                    if "durationMs" in metric and metric["durationMs"] is not None and metric["durationMs"] > 0:
+                        durations.append(metric["durationMs"])
+                    
+                    if "executedHost" in metric and metric["executedHost"]:
+                        hosts.add(metric["executedHost"])
+        
+        if not durations:
+            return {"error": "No valid duration data found in results"}
+        
+        # Calculate statistics
+        durations.sort()
+        total = sum(durations)
+        count = len(durations)
+        
+        stats = {
+            "count": count,
+            "min_ms": durations[0],
+            "max_ms": durations[-1],
+            "avg_ms": total / count,
+            "median_ms": durations[count // 2] if count % 2 != 0 else (durations[count // 2 - 1] + durations[count // 2]) / 2,
+            "total_ms": total,
+            "unique_hosts": len(hosts),
+            "hosts": list(hosts)
+        }
+        
+        # Calculate percentiles
+        if count >= 10:
+            stats["p90_ms"] = durations[int(count * 0.9)]
+            stats["p95_ms"] = durations[int(count * 0.95)]
+            stats["p99_ms"] = durations[int(count * 0.99)]
+        
+        return stats
 
 
 # Factory function to create a client instance

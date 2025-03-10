@@ -258,6 +258,7 @@ std::vector<faabric::BatchExecuteRequestStatus> FaasmClient::getInflightApps() {
         std::cerr << "[ERROR] Exception during HTTP request: " << e.what() << std::endl;
         throw FaasmClientException("Error getting in-flight apps: " + std::string(e.what()));
     }
+    // std::cout << "Receiving: " << response << std::endl;
     
     // Parse the response as a proper GetInFlightAppsResponse message
     std::vector<faabric::BatchExecuteRequestStatus> result;
@@ -327,6 +328,7 @@ faabric::BatchExecuteRequestStatus FaasmClient::checkAsyncStatus(
     std::string statusJson;
     google::protobuf::util::JsonPrintOptions printOptions;
     printOptions.add_whitespace = false;
+    printOptions.always_print_primitive_fields = true; // Make sure we include all primitive fields
     google::protobuf::util::MessageToJsonString(status, &statusJson, printOptions);
     
     // Create proper HTTP message for EXECUTE_BATCH_STATUS
@@ -342,6 +344,7 @@ faabric::BatchExecuteRequestStatus FaasmClient::checkAsyncStatus(
         std::string statusResponse = httpPost(url, statusMsgJson);
         
         google::protobuf::util::JsonParseOptions parseOptions;
+        parseOptions.ignore_unknown_fields = false; // Make sure we parse all fields
         bool parseSuccess = google::protobuf::util::JsonStringToMessage(statusResponse, &status, parseOptions).ok();
         
         if (!parseSuccess) {
@@ -476,6 +479,7 @@ std::string FaasmClient::preparePlannerMsg(const std::string& msgType, const std
 // Make HTTP POST request
 std::string FaasmClient::httpPost(const std::string& url, const std::string& data)
 {
+    // std::cout << "Sending: " << data << std::endl;
     CURL* curl = curl_easy_init();
     std::string responseBuffer;
     
@@ -573,6 +577,36 @@ std::shared_ptr<faabric::BatchExecuteRequest> FaasmClient::createBatchRequest(
     return req;
 }
 
+/**
+ * Extract execution metrics from a BatchExecuteRequestStatus
+ * 
+ * @param status The status object returned from an invocation
+ * @return Vector of metrics for each message in the batch
+ */
+std::vector<MessageMetrics> FaasmClient::extractMessageMetrics(const faabric::BatchExecuteRequestStatus& status) {
+    std::vector<MessageMetrics> metrics;
+    
+    // Process each message in the status
+    for (int i = 0; i < status.messageresults_size(); i++) {
+        const faabric::Message& msg = status.messageresults(i);
+        
+        MessageMetrics metric;
+        metric.id = msg.id();
+        metric.appId = msg.appid();
+        metric.groupId = msg.groupid();
+        metric.groupIdx = msg.groupidx();
+        metric.executedHost = msg.executedhost();
+        metric.startTimestamp = msg.starttimestamp();
+        metric.finishTimestamp = msg.finishtimestamp();
+        metric.returnValue = msg.returnvalue();
+        metric.outputData = msg.outputdata();
+        
+        metrics.push_back(metric);
+    }
+    
+    return metrics;
+}
+
 // Just send request without waiting for results (async mode)
 int32_t FaasmClient::invokeAsync(
     const std::string& url,
@@ -614,8 +648,8 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
     int expectedNumMessages,
     int numRetries
 ) {
-    const int pollPeriodMs = 2000;
-    const int sleepPeriodMs = 1500;
+    const int pollPeriodMs = 500;
+    const int sleepPeriodMs = 1000;
     
     // Try to invoke with retries for "No available hosts" errors
     std::string responseText;
@@ -643,6 +677,7 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
     // Parse response
     faabric::BatchExecuteRequestStatus berStatus;
     google::protobuf::util::JsonParseOptions parseOptions;
+    parseOptions.ignore_unknown_fields = false; // Make sure we parse all fields
     google::protobuf::util::JsonStringToMessage(responseText, &berStatus, parseOptions);
     berStatus.set_expectednummessages(expectedNumMessages);
     
@@ -650,6 +685,7 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
     std::string statusJson;
     google::protobuf::util::JsonPrintOptions printOptions;
     printOptions.add_whitespace = false;
+    printOptions.always_print_primitive_fields = true; // Make sure we include all primitive fields
     google::protobuf::util::MessageToJsonString(berStatus, &statusJson, printOptions);
     
     faabric::planner::HttpMessage statusHttpMsg;
@@ -665,6 +701,8 @@ faabric::BatchExecuteRequestStatus FaasmClient::invokeAndAwait(
         
         try {
             std::string statusResponse = httpPost(url, statusMsgJson);
+            // Use proper options to ensure all fields are parsed
+            parseOptions.ignore_unknown_fields = false;
             google::protobuf::util::JsonStringToMessage(statusResponse, &berStatus, parseOptions);
             
             if (berStatus.finished()) {

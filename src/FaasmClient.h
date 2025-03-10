@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include "FaasmClientTypes.h"
 
 // Forward declarations for protobuf classes - full definitions will be included in .cpp files
 namespace faabric {
@@ -74,6 +75,14 @@ public:
      */
     std::vector<faabric::BatchExecuteRequestStatus> getInflightApps();
 
+    /**
+     * Extract execution metrics from a BatchExecuteRequestStatus
+     * 
+     * @param status The status object returned from an invocation
+     * @return Vector of metrics for each message in the batch
+     */
+    std::vector<MessageMetrics> extractMessageMetrics(const faabric::BatchExecuteRequestStatus& status);
+
 private:
     // Private constructor for singleton
     FaasmClient();
@@ -115,7 +124,7 @@ private:
         const std::string& url,
         const std::string& jsonMsg,
         int expectedNumMessages,
-        int numRetries = 30
+        int numRetries = 20
     );
     
     // Just send request without waiting (for async mode)
@@ -123,7 +132,7 @@ private:
         const std::string& url,
         const std::string& jsonMsg,
         int expectedNumMessages,
-        int numRetries = 30
+        int numRetries = 10
     );
 };
 
