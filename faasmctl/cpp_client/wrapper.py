@@ -160,17 +160,19 @@ class FaasmClientWrapper:
     
     def get_cluster_utilization(self, 
                               num_vms: int, 
-                              num_cpus_per_vm: int) -> Tuple[int, int, float, Dict[str, int]]:
+                              num_cpus_per_vm: int) -> Tuple[int, int, float, Dict[str, int], List[Dict[str, Any]]]:
         """
-        Calculate cluster utilization
+        Calculate cluster utilization and return info about running apps
         
         Args:
             num_vms: Number of VMs in the cluster
             num_cpus_per_vm: Number of CPUs per VM
             
         Returns:
-            Tuple of (idle_vms, idle_cpus, utilization_percentage, host_usage)
-            where host_usage is a dict mapping host IPs to number of used CPUs
+            Tuple of (idle_vms, idle_cpus, utilization_percentage, host_usage, running_apps)
+            where:
+            - host_usage is a dict mapping host IPs to number of used CPUs
+            - running_apps is a list of dicts with information about running apps
         """
         in_flight_apps = self.get_inflight_apps()
         
@@ -200,7 +202,8 @@ class FaasmClientWrapper:
         # Calculate utilization percentage
         utilization = (total_cpus - idle_cpus) / total_cpus * 100.0 if total_cpus > 0 else 0.0
         
-        return idle_vms, idle_cpus, utilization, worker_occupation
+        # Simply return the unmodified in_flight_apps list as the fifth return value
+        return idle_vms, idle_cpus, utilization, worker_occupation, in_flight_apps
     
     def batch_invoke(self, 
                     user: str,
